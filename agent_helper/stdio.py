@@ -20,6 +20,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import IO, Any
 from urllib.parse import urlsplit
@@ -202,11 +203,14 @@ class Lifespan:
         self.started = asyncio.Event()
         self.stopped = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
+        self.failure: str | None = None
 
     async def _receive(self) -> Message:
         return await self.inbox.get()
 
     async def _send(self, message: Message) -> None:
+        if message["type"] in {"lifespan.startup.failed", "lifespan.shutdown.failed"}:
+            self.failure = message.get("message") or message["type"]
         if message["type"].startswith("lifespan.startup"):
             self.started.set()
         elif message["type"].startswith("lifespan.shutdown"):
@@ -216,16 +220,34 @@ class Lifespan:
         scope = {"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}
 
         async def run() -> None:
-            await self.app(scope, self._receive, self._send)
+            try:
+                await self.app(scope, self._receive, self._send)
+            finally:
+                # A task that exits without sending a result must also wake its waiter.
+                self.started.set()
+                self.stopped.set()
 
         self.task = asyncio.create_task(run())
         await self.inbox.put({"type": "lifespan.startup"})
         await self.started.wait()
+        await self._raise_failure()
+        if self.task.done():
+            await self.task
+            raise RuntimeError("application lifespan exited before startup completed")
         return self
+
+    async def _raise_failure(self) -> None:
+        if self.failure is not None:
+            if self.task is not None:
+                self.task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self.task
+            raise RuntimeError(self.failure)
 
     async def __aexit__(self, *_: object) -> None:
         await self.inbox.put({"type": "lifespan.shutdown"})
         await self.stopped.wait()
+        await self._raise_failure()
         if self.task is not None:
             await self.task
 
