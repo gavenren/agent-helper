@@ -89,7 +89,7 @@ def claim_database(db_path: Path) -> Any:
         lock.close()
         raise Refused(f"another stdio process uses {db_path.parent}; give each one its own DATA_DIR") from None
     if db_path.exists() and db_path.stat().st_size > 0:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+        with sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True) as db:
             try:
                 row = db.execute("SELECT value FROM instance_meta WHERE name = ?", (OWNER_MARK,)).fetchone()
             except sqlite3.OperationalError:  # no such table: not a database of this service yet
